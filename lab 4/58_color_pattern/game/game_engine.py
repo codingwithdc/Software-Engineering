@@ -1,18 +1,11 @@
+import array
 import math
 import random
-from array import array
-
 import pygame
 from game.color_button import ColorButton
 
-
-# Tone frequency (Hz) for each color ID: C4, E4, G4, C5
-TONE_FREQUENCIES = {
-    0: 261.63,  # Red
-    1: 329.63,  # Blue
-    2: 392.00,  # Green
-    3: 523.25,  # Yellow
-}
+# C4, E4, G4, C5 -> Red, Blue, Green, Yellow
+TONE_FREQS = {0: 261.63, 1: 329.63, 2: 392.00, 3: 523.25}
 
 
 class GameEngine:
@@ -47,59 +40,64 @@ class GameEngine:
         self.player_lit_start = 0
         self.player_flash_duration = 150
 
+        # Per-step countdown during PLAYER_TURN
+        self.step_time_limit = 3000   # ms allowed for each click
+        self.turn_start_time = 0
+        self.game_over_reason = ""
+
         self.font_title = pygame.font.SysFont(None, 40)
         self.font_medium = pygame.font.SysFont(None, 28)
 
-        self.round_lead_in = 600
-        self.game_over_reason = None
-
-        # Per-step countdown during PLAYER_TURN (resets after every correct click)
-        self.step_time_limit = 3000
-        self.step_deadline = 0
-
-        self.sounds = self._init_sounds()
+        self.waveform = "sine"            # or "square"
+        self.player_tone_duration = 220   # ms
+        self._init_audio()
 
         self.start_next_round()
 
-    # ------------------------------------------------------------------ audio
-
-    def _init_sounds(self):
-        """Build one synthesized tone per color. Falls back to silence if no audio device."""
+    # ---------- Audio (pure Python synthesis, no numpy / no files) ----------
+    def _init_audio(self):
+        self.audio_enabled = False
+        self._tone_cache = {}
         try:
             if not pygame.mixer.get_init():
-                pygame.mixer.init(frequency=44100, size=-16, channels=1, buffer=512)
-            return {cid: self._build_tone(freq) for cid, freq in TONE_FREQUENCIES.items()}
+                pygame.mixer.init(44100, -16, 1, 512)
+            self.sample_rate, size, self.channels = pygame.mixer.get_init()
+            self.audio_enabled = (size == -16)   # synth writes signed 16-bit samples
         except pygame.error:
-            return {}
+            pass  # no audio device: game still runs silently
 
-    def _build_tone(self, freq, duration_ms=1000, volume=0.35):
-        """Synthesize a sine tone as signed 16-bit PCM using the built-in array module."""
-        sample_rate, _size, channels = pygame.mixer.get_init()
-        n_samples = int(sample_rate * duration_ms / 1000)
-        ramp = max(1, int(sample_rate * 0.01))  # 10 ms attack/release to avoid clicks
-        amplitude = int(32767 * volume)
-        step = 2 * math.pi * freq / sample_rate
+    def _make_tone(self, freq, duration_ms):
+        rate = self.sample_rate
+        n = max(1, int(rate * duration_ms / 1000))
+        fade = max(1, min(int(rate * 0.01), n // 2))   # 10 ms fade in/out, avoids clicks
+        amp = 32767 * (0.35 if self.waveform == "sine" else 0.18)
+        step = 2 * math.pi * freq / rate
 
-        samples = array("h")
-        for i in range(n_samples):
-            envelope = min(1.0, i / ramp, (n_samples - i) / ramp)
-            value = int(amplitude * envelope * math.sin(step * i))
-            samples.extend([value] * channels)  # duplicate per channel if mixer is stereo
+        buf = array.array("h")
+        for i in range(n):
+            if i < fade:
+                env = i / fade
+            elif i > n - fade:
+                env = (n - i) / fade
+            else:
+                env = 1.0
+            wave = math.sin(step * i)
+            if self.waveform == "square":
+                wave = 1.0 if wave >= 0 else -1.0
+            sample = int(amp * env * wave)
+            for _ in range(self.channels):
+                buf.append(sample)
+        return pygame.mixer.Sound(buffer=buf.tobytes())
 
-        return pygame.mixer.Sound(buffer=samples)
-
-    def play_tone(self, color_id):
-        sound = self.sounds.get(color_id)
-        if sound:
-            sound.stop()
-            sound.play()
-
-    def stop_tone(self, color_id, fade_ms=40):
-        sound = self.sounds.get(color_id)
-        if sound:
-            sound.fadeout(fade_ms)
-
-    # ------------------------------------------------------------------ game flow
+    def play_tone(self, color_id, duration_ms):
+        if not self.audio_enabled:
+            return
+        key = (color_id, int(duration_ms))
+        sound = self._tone_cache.get(key)
+        if sound is None:
+            sound = self._make_tone(TONE_FREQS[color_id], duration_ms)
+            self._tone_cache[key] = sound
+        sound.play()
 
     def start_next_round(self):
         new_color = random.randint(0, 3)
@@ -108,14 +106,14 @@ class GameEngine:
         # Speed up playback as score rises, clamped to minimum thresholds
         self.flash_duration = max(180, 450 - self.score * 25)
         self.pause_duration = max(80, 200 - self.score * 10)
-        self.step_time_limit = max(1500, 3000 - self.score * 100)
 
         self.player_input.clear()
         self.state = "WATCH"
-        # Start in a lead-in pause; update() lights step 0 when it ends
-        self.showing_step = -1
-        self.is_flashing = False
+        self.showing_step = 0
         self.step_start_time = pygame.time.get_ticks()
+        self.is_flashing = True
+        self.buttons[self.sequence[0]].is_lit = True
+        self.play_tone(self.sequence[0], self.flash_duration)
 
     def update(self):
         now = pygame.time.get_ticks()
@@ -123,34 +121,32 @@ class GameEngine:
         if self.player_lit_button is not None:
             if now - self.player_lit_start >= self.player_flash_duration:
                 self.player_lit_button.is_lit = False
-                self.stop_tone(self.player_lit_button.color_id)
                 self.player_lit_button = None
 
         if self.state == "WATCH":
+            current_btn_id = self.sequence[self.showing_step]
+
             if self.is_flashing:
-                current_btn_id = self.sequence[self.showing_step]
                 if now - self.step_start_time >= self.flash_duration:
                     self.buttons[current_btn_id].is_lit = False
-                    self.stop_tone(current_btn_id)
                     self.is_flashing = False
                     self.step_start_time = now
             else:
-                delay = self.round_lead_in if self.showing_step < 0 else self.pause_duration
-                if now - self.step_start_time >= delay:
+                if now - self.step_start_time >= self.pause_duration:
                     self.showing_step += 1
                     if self.showing_step < len(self.sequence):
                         next_id = self.sequence[self.showing_step]
                         self.buttons[next_id].is_lit = True
-                        self.play_tone(next_id)
+                        self.play_tone(next_id, self.flash_duration)
                         self.is_flashing = True
                         self.step_start_time = now
                     else:
                         self.state = "PLAYER_TURN"
-                        self.step_deadline = now + self.step_time_limit
+                        self.turn_start_time = now
 
         elif self.state == "PLAYER_TURN":
-            if now >= self.step_deadline:
-                self.game_over_reason = "timeout"
+            if now - self.turn_start_time >= self.step_time_limit:
+                self.game_over_reason = "TIME'S UP!"
                 self.state = "GAME_OVER"
 
     def handle_event(self, event):
@@ -165,7 +161,7 @@ class GameEngine:
                     btn.is_lit = True
                     self.player_lit_button = btn
                     self.player_lit_start = pygame.time.get_ticks()
-                    self.play_tone(btn.color_id)
+                    self.play_tone(btn.color_id, self.player_tone_duration)
 
                     self.register_player_click(btn.color_id)
                     break
@@ -175,7 +171,7 @@ class GameEngine:
         current_idx = len(self.player_input) - 1
 
         if self.player_input[current_idx] != self.sequence[current_idx]:
-            self.game_over_reason = "wrong"
+            self.game_over_reason = "WRONG PATTERN!"
             self.state = "GAME_OVER"
             return
 
@@ -183,7 +179,7 @@ class GameEngine:
             self.score += 1
             self.start_next_round()
         else:
-            self.step_deadline = pygame.time.get_ticks() + self.step_time_limit
+            self.turn_start_time = pygame.time.get_ticks()  # correct click: refill timer
 
     def reset(self):
         self.sequence.clear()
@@ -193,25 +189,6 @@ class GameEngine:
             btn.is_lit = False
         self.player_lit_button = None
         self.start_next_round()
-
-    def render_timer_bar(self, screen):
-        remaining = max(0, self.step_deadline - pygame.time.get_ticks())
-        frac = remaining / self.step_time_limit
-
-        bar_w, bar_h = 260, 8
-        x = self.width // 2 - bar_w // 2
-        y = 124
-
-        if frac > 0.5:
-            color = (80, 240, 130)
-        elif frac > 0.25:
-            color = (255, 210, 60)
-        else:
-            color = (240, 70, 70)
-
-        pygame.draw.rect(screen, (50, 54, 64), (x, y, bar_w, bar_h), border_radius=4)
-        if remaining > 0:
-            pygame.draw.rect(screen, color, (x, y, int(bar_w * frac), bar_h), border_radius=4)
 
     def render(self, screen):
         screen.fill((22, 24, 30))
@@ -238,8 +215,7 @@ class GameEngine:
             overlay.fill((0, 0, 0, 200))
             screen.blit(overlay, (0, 0))
 
-            over_text = "TIME'S UP! GAME OVER" if self.game_over_reason == "timeout" else "WRONG PATTERN! GAME OVER"
-            over_surf = self.font_title.render(over_text, True, (240, 70, 70))
+            over_surf = self.font_title.render(f"{self.game_over_reason} GAME OVER", True, (240, 70, 70))
             screen.blit(over_surf, (self.width // 2 - over_surf.get_width() // 2, self.height // 2 - 40))
 
             final_score_surf = self.font_medium.render(f"Final Score: {self.score}", True, (255, 255, 255))
@@ -247,3 +223,21 @@ class GameEngine:
 
             restart_surf = self.font_medium.render("Press [R] to Play Again", True, (200, 200, 200))
             screen.blit(restart_surf, (self.width // 2 - restart_surf.get_width() // 2, self.height // 2 + 50))
+    def render_timer_bar(self, screen):
+        elapsed = pygame.time.get_ticks() - self.turn_start_time
+        ratio = max(0.0, 1.0 - elapsed / self.step_time_limit)
+
+        bar_w, bar_h = 300, 10
+        x = self.width // 2 - bar_w // 2
+        y = 124
+
+        if ratio > 0.5:
+            color = (80, 240, 130)
+        elif ratio > 0.25:
+            color = (255, 200, 60)
+        else:
+            color = (240, 70, 70)
+
+        pygame.draw.rect(screen, (50, 54, 64), (x, y, bar_w, bar_h), border_radius=5)
+        if ratio > 0:
+            pygame.draw.rect(screen, color, (x, y, int(bar_w * ratio), bar_h), border_radius=5)
