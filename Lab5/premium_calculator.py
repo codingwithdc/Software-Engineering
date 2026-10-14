@@ -24,6 +24,7 @@ UNDERWRITER_TOKEN = os.environ.get("UNDERWRITER_TOKEN", "")
 LOG_FILE = "premium_quotes.log"
 BASE_RATES = {"health": 5000, "motor": 3000, "life": 8000}
 
+
 @dataclass
 class Applicant:
     """Risk details of the person being quoted."""
@@ -31,6 +32,7 @@ class Applicant:
     age: int
     smoker: bool = False
     claims: int = 0
+
 
 def calculate_premium(policy_type, sum_insured, applicant, discounts=None):
     """Return the yearly premium for a policy, never below zero."""
@@ -50,6 +52,7 @@ def calculate_premium(policy_type, sum_insured, applicant, discounts=None):
     premium -= sum(discounts)
     return max(round(premium, 2), 0.0)
 
+
 def age_from_dob(dob, today=None):
     """Return the age in full years for a date of birth in DD-MM-YYYY."""
     born = datetime.strptime(dob, "%d-%m-%Y").date()
@@ -57,9 +60,11 @@ def age_from_dob(dob, today=None):
     had_birthday = (today.month, today.day) >= (born.month, born.day)
     return today.year - born.year - (0 if had_birthday else 1)
 
+
 def policy_number():
     """Return an unpredictable policy number like POL-123456."""
     return "POL-" + str(100000 + secrets.randbelow(900000))
+
 
 def save_quote(name, premium):
     """Store a quote in the quote book and append it to the log file."""
@@ -71,29 +76,37 @@ def save_quote(name, premium):
         log.write(f"{number},{name},{premium:.2f}\n")
     return number
 
+
 def import_policies(xml_text):
     """Parse partner XML and return (type, age, sum) tuples."""
     root = ET.fromstring(xml_text)
     result = []
     for policy in root.findall("policy"):
         try:
-            result.append((policy.get("type"), int(policy.get("age")), int(policy.get("sum"))))
+            result.append((policy.get("type"),
+                           int(policy.get("age")),
+                           int(policy.get("sum"))))
         except (TypeError, ValueError):
             print("Skipping invalid policy row:", policy.attrib)
     return result
+
 
 def fetch_rates(url):
     """Download a rate table over verified HTTPS only."""
     if not url.lower().startswith("https://"):
         raise ValueError("Only https:// URLs are allowed")
     ctx = ssl.create_default_context()
-    with urllib.request.urlopen(url, context=ctx, timeout=10) as resp:  # nosec B310
+    # Scheme is restricted to https above, so B310 is handled.
+    with urllib.request.urlopen(  # nosec B310
+            url, context=ctx, timeout=10) as resp:
         return resp.read()
+
 
 def import_claim_documents(archive_path):
     """Safely extract a customer claim archive into claims_docs."""
     with tarfile.open(archive_path) as tar:
         tar.extractall("claims_docs", filter="data")
+
 
 def monthly_instalment(premium, months=12):
     """Return the instalment for splitting a premium over some months."""
@@ -101,11 +114,13 @@ def monthly_instalment(premium, months=12):
         raise ValueError("months must be a positive number")
     return round(premium / months, 2)
 
+
 def is_authorised(token):
     """Check an underwriter token in constant time."""
     if not UNDERWRITER_TOKEN:
         return False
     return hmac.compare_digest(token, UNDERWRITER_TOKEN)
+
 
 def renewal_due(start, years=1):
     """Return the renewal date, moving 29 Feb to 28 Feb when needed."""
@@ -116,11 +131,13 @@ def renewal_due(start, years=1):
         due = start_date.replace(year=start_date.year + years, day=28)
     return due.strftime("%Y-%m-%d")
 
+
 def print_quotes():
     """Print every saved quote."""
     print("===== Quote Book =====")
     for index, (number, quote) in enumerate(QUOTES.items(), start=1):
         print(index, number, quote["name"], "Rs.", quote["premium"])
+
 
 def main():
     """Run a demo of the calculator."""
@@ -128,7 +145,8 @@ def main():
     p1 = calculate_premium("health", 500000, young)
     p2 = calculate_premium("health", 500000, young)
     p3 = calculate_premium("motor", 800000, Applicant(age=50, smoker=False))
-    p4 = calculate_premium("life", 100000, Applicant(age=25), [3000, 3000, 3000])
+    p4 = calculate_premium("life", 100000, Applicant(age=25),
+                           [3000, 3000, 3000])
     print("Quote 1:", p1)
     print("Quote 2 (same customer details):", p2)
     print("Non-smoker aged 50:", p3)
@@ -147,6 +165,7 @@ def main():
     print("Authorised:", is_authorised(token))
     print("Server would listen on", HOST)
     print_quotes()
+
 
 if __name__ == "__main__":
     main()
