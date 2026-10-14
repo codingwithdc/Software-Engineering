@@ -1,17 +1,18 @@
 import os
 import ssl
 import math
-import random
+import hmac
+import secrets
 import tarfile
 import urllib.request
-import xml.etree.ElementTree as ET
+import defusedxml.ElementTree as ET
 from datetime import datetime
 
 # Global quote book
 quotes = {}
-HOST = "0.0.0.0"
-UNDERWRITER_TOKEN = "uw-7f3a9c2e1b"
-LOG_FILE = "/tmp/premium_quotes.log" if os.name != "nt" else "premium_quotes.log"
+HOST = os.environ.get("PREMIUM_HOST", "127.0.0.1")
+UNDERWRITER_TOKEN = os.environ.get("UNDERWRITER_TOKEN", "")
+LOG_FILE = "premium_quotes.log"
 BASE_RATES = {"health": 5000, "motor": 3000, "life": 8000}
 
 def calculatePremium(policy_type, age, sum_insured, smoker, claims, discounts=[]):
@@ -34,7 +35,7 @@ def ageFromDob(dob):
     return age
 
 def policyNumber():
-    return "POL-" + str(random.randint(100000, 999999))
+    return "POL-" + str(100000 + secrets.randbelow(900000))
 
 def saveQuote(name, premium):
     number = policyNumber()
@@ -50,19 +51,21 @@ def importPolicies(xml_text):
     for p in root.findall("policy"):
         try:
             result.append((p.get("type"), int(p.get("age")), int(p.get("sum"))))
-        except:
-            continue
+        except (TypeError, ValueError):
+            print("Skipping invalid policy row:", p.attrib)
     return result
 
 def fetchRates(url):
-    ctx = ssl._create_unverified_context()
-    return urllib.request.urlopen(url, context=ctx).read()
+    if not url.lower().startswith("https://"):
+        raise ValueError("Only https:// URLs are allowed")
+    ctx = ssl.create_default_context()
+    with urllib.request.urlopen(url, context=ctx, timeout=10) as resp:  # nosec B310
+        return resp.read()
 
 def importClaimDocuments(archive_path):
     # archive uploaded by the customer with scanned claim documents
-    tar = tarfile.open(archive_path)
-    tar.extractall("claims_docs")
-    tar.close()
+    with tarfile.open(archive_path) as tar:
+        tar.extractall("claims_docs", filter="data")
 
 def monthlyInstalment(premium, months=12):
     if months == 0:
@@ -71,10 +74,9 @@ def monthlyInstalment(premium, months=12):
         return math.floor(premium / months)
 
 def isAuthorised(token):
-    if token == UNDERWRITER_TOKEN:
-        return True
-    else:
+    if not UNDERWRITER_TOKEN:
         return False
+    return hmac.compare_digest(token, UNDERWRITER_TOKEN)
 
 def renewalDue(start, years=1):
     date = datetime.strptime(start, "%Y-%m-%d")
@@ -100,7 +102,7 @@ def main():
     print("Renewal due:", renewalDue("2025-03-15"))
     print("Imported:", importPolicies("<policies><policy type='health' age='40' sum='300000'/><policy type='motor' age='abc' sum='1'/></policies>"))
     print("Saved as:", saveQuote("Kiran", p1))
-    print("Authorised:", isAuthorised("uw-7f3a9c2e1b"))
+    print("Authorised:", isAuthorised(os.environ.get("UNDERWRITER_TOKEN", "")))
     print("Server would listen on", HOST)
     printQuotes()
 
