@@ -1,109 +1,152 @@
-import os
-import ssl
-import math
+"""Insurance premium calculator.
+
+Quotes health, motor and life premiums, works out an applicant's age,
+saves quotes to a log, imports partner policies from XML, downloads rate
+tables, extracts claim archives, splits premiums into instalments and
+computes renewal dates.
+"""
+
 import hmac
+import os
 import secrets
+import ssl
 import tarfile
 import urllib.request
+from dataclasses import dataclass
+from datetime import date, datetime
+
 import defusedxml.ElementTree as ET
-from datetime import datetime
 
 # Global quote book
-quotes = {}
+QUOTES = {}
 HOST = os.environ.get("PREMIUM_HOST", "127.0.0.1")
 UNDERWRITER_TOKEN = os.environ.get("UNDERWRITER_TOKEN", "")
 LOG_FILE = "premium_quotes.log"
 BASE_RATES = {"health": 5000, "motor": 3000, "life": 8000}
 
-def calculatePremium(policy_type, age, sum_insured, smoker, claims, discounts=[]):
-    base = BASE_RATES[policy_type]
-    premium = base + sum_insured * 0.002
-    if age > 45:
-        premium = premium * 1.5
-    if smoker:
-        premium = premium * 1.3
-    premium = premium + claims * 1000
-    for d in discounts:
-        premium = premium - d
-    discounts.append(500)
-    return premium
+@dataclass
+class Applicant:
+    """Risk details of the person being quoted."""
 
-def ageFromDob(dob):
-    born = datetime.strptime(dob, "%d-%m-%Y")
-    today = datetime.now()
-    age = today.year - born.year
-    return age
+    age: int
+    smoker: bool = False
+    claims: int = 0
 
-def policyNumber():
+def calculate_premium(policy_type, sum_insured, applicant, discounts=None):
+    """Return the yearly premium for a policy, never below zero."""
+    if policy_type not in BASE_RATES:
+        raise ValueError(f"Unknown policy type: {policy_type}")
+    if not isinstance(applicant.smoker, bool):
+        raise TypeError("smoker must be True or False")
+    if discounts is None:
+        discounts = []
+
+    premium = BASE_RATES[policy_type] + sum_insured * 0.002
+    if applicant.age > 45:
+        premium *= 1.5
+    if applicant.smoker:
+        premium *= 1.3
+    premium += applicant.claims * 1000
+    premium -= sum(discounts)
+    return max(round(premium, 2), 0.0)
+
+def age_from_dob(dob, today=None):
+    """Return the age in full years for a date of birth in DD-MM-YYYY."""
+    born = datetime.strptime(dob, "%d-%m-%Y").date()
+    today = today or date.today()
+    had_birthday = (today.month, today.day) >= (born.month, born.day)
+    return today.year - born.year - (0 if had_birthday else 1)
+
+def policy_number():
+    """Return an unpredictable policy number like POL-123456."""
     return "POL-" + str(100000 + secrets.randbelow(900000))
 
-def saveQuote(name, premium):
-    number = policyNumber()
-    quotes[number] = {"name": name, "premium": premium}
-    f = open(LOG_FILE, "a")
-    f.write("%s,%s,%.2f\n" % (number, name, premium))
-    f.close()
+def save_quote(name, premium):
+    """Store a quote in the quote book and append it to the log file."""
+    number = policy_number()
+    while number in QUOTES:
+        number = policy_number()
+    QUOTES[number] = {"name": name, "premium": premium}
+    with open(LOG_FILE, "a", encoding="utf-8") as log:
+        log.write(f"{number},{name},{premium:.2f}\n")
     return number
 
-def importPolicies(xml_text):
+def import_policies(xml_text):
+    """Parse partner XML and return (type, age, sum) tuples."""
     root = ET.fromstring(xml_text)
     result = []
-    for p in root.findall("policy"):
+    for policy in root.findall("policy"):
         try:
-            result.append((p.get("type"), int(p.get("age")), int(p.get("sum"))))
+            result.append((policy.get("type"), int(policy.get("age")), int(policy.get("sum"))))
         except (TypeError, ValueError):
-            print("Skipping invalid policy row:", p.attrib)
+            print("Skipping invalid policy row:", policy.attrib)
     return result
 
-def fetchRates(url):
+def fetch_rates(url):
+    """Download a rate table over verified HTTPS only."""
     if not url.lower().startswith("https://"):
         raise ValueError("Only https:// URLs are allowed")
     ctx = ssl.create_default_context()
     with urllib.request.urlopen(url, context=ctx, timeout=10) as resp:  # nosec B310
         return resp.read()
 
-def importClaimDocuments(archive_path):
-    # archive uploaded by the customer with scanned claim documents
+def import_claim_documents(archive_path):
+    """Safely extract a customer claim archive into claims_docs."""
     with tarfile.open(archive_path) as tar:
         tar.extractall("claims_docs", filter="data")
 
-def monthlyInstalment(premium, months=12):
-    if months == 0:
-        return premium
-    else:
-        return math.floor(premium / months)
+def monthly_instalment(premium, months=12):
+    """Return the instalment for splitting a premium over some months."""
+    if months <= 0:
+        raise ValueError("months must be a positive number")
+    return round(premium / months, 2)
 
-def isAuthorised(token):
+def is_authorised(token):
+    """Check an underwriter token in constant time."""
     if not UNDERWRITER_TOKEN:
         return False
     return hmac.compare_digest(token, UNDERWRITER_TOKEN)
 
-def renewalDue(start, years=1):
-    date = datetime.strptime(start, "%Y-%m-%d")
-    return date.replace(year=date.year + years).strftime("%Y-%m-%d")
+def renewal_due(start, years=1):
+    """Return the renewal date, moving 29 Feb to 28 Feb when needed."""
+    start_date = datetime.strptime(start, "%Y-%m-%d").date()
+    try:
+        due = start_date.replace(year=start_date.year + years)
+    except ValueError:
+        due = start_date.replace(year=start_date.year + years, day=28)
+    return due.strftime("%Y-%m-%d")
 
-def printQuotes():
+def print_quotes():
+    """Print every saved quote."""
     print("===== Quote Book =====")
-    keys = list(quotes.keys())
-    for i in range(len(keys)):
-        print(i + 1, keys[i], quotes[keys[i]]["name"], "Rs.", quotes[keys[i]]["premium"])
+    for index, (number, quote) in enumerate(QUOTES.items(), start=1):
+        print(index, number, quote["name"], "Rs.", quote["premium"])
 
 def main():
-    p1 = calculatePremium("health", 30, 500000, False, 0)
-    p2 = calculatePremium("health", 30, 500000, False, 0)
-    p3 = calculatePremium("motor", 50, 800000, "no", 0)
-    p4 = calculatePremium("life", 25, 100000, False, 0, [3000, 3000, 3000])
+    """Run a demo of the calculator."""
+    young = Applicant(age=30)
+    p1 = calculate_premium("health", 500000, young)
+    p2 = calculate_premium("health", 500000, young)
+    p3 = calculate_premium("motor", 800000, Applicant(age=50, smoker=False))
+    p4 = calculate_premium("life", 100000, Applicant(age=25), [3000, 3000, 3000])
     print("Quote 1:", p1)
     print("Quote 2 (same customer details):", p2)
     print("Non-smoker aged 50:", p3)
     print("Life with stacked discounts:", p4)
-    print("Age from DOB 31-12-1990:", ageFromDob("31-12-1990"))
-    print("Monthly instalment:", monthlyInstalment(p3))
-    print("Renewal due:", renewalDue("2025-03-15"))
-    print("Imported:", importPolicies("<policies><policy type='health' age='40' sum='300000'/><policy type='motor' age='abc' sum='1'/></policies>"))
-    print("Saved as:", saveQuote("Kiran", p1))
-    print("Authorised:", isAuthorised(os.environ.get("UNDERWRITER_TOKEN", "")))
+    print("Age from DOB 31-12-1990:", age_from_dob("31-12-1990"))
+    print("Monthly instalment:", monthly_instalment(p3))
+    print("Renewal due:", renewal_due("2025-03-15"))
+    print("Leap-year renewal:", renewal_due("2024-02-29"))
+    sample_xml = ("<policies>"
+                  "<policy type='health' age='40' sum='300000'/>"
+                  "<policy type='motor' age='abc' sum='1'/>"
+                  "</policies>")
+    print("Imported:", import_policies(sample_xml))
+    print("Saved as:", save_quote("Kiran", p1))
+    token = os.environ.get("UNDERWRITER_TOKEN", "")
+    print("Authorised:", is_authorised(token))
     print("Server would listen on", HOST)
-    printQuotes()
+    print_quotes()
 
-main()
+if __name__ == "__main__":
+    main()
