@@ -12,9 +12,24 @@ def clean_dish_name(name):
 def parse_item_prices(text):
     """
     Parses comma-separated prices into a list of ints.
-    Assumes every price is a whole number.
+    Blank entries are skipped. Returns an empty list if the input is
+    not a string or any price is not a non-negative whole number.
     """
-    return [int(price) for price in text.split(',')]
+    if not isinstance(text, str):
+        return []
+    prices = []
+    for part in text.split(','):
+        part = part.strip()
+        if part == "":
+            continue
+        try:
+            price = int(part)
+        except ValueError:
+            return []
+        if price < 0:
+            return []
+        prices.append(price)
+    return prices
 
 def split_amount(text):
     """
