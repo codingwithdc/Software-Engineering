@@ -54,15 +54,18 @@ def split_amount(text):
 def main():
     print("==== Running clean_dish_name ====")
     value = input("Enter a dish name from the menu (e.g. *paneer tikka*): ")
-    print("Dish name:", clean_dish_name(value))
+    dish = clean_dish_name(value)
+    print("Dish name:", dish if dish else "Invalid dish name")
 
     print("\n==== Running parse_item_prices ====")
     value = input("Enter item prices separated by commas (e.g. 250,180,320): ")
-    print("Item prices:", parse_item_prices(value))
+    prices = parse_item_prices(value)
+    print("Item prices:", prices if prices else "Invalid prices")
 
     print("\n==== Running split_amount ====")
     value = input("Enter the bill and number of people as TOTAL/PEOPLE (e.g. 1200/4): ")
-    print("Each person pays:", split_amount(value))
+    share = split_amount(value)
+    print("Each person pays:", share if share is not None else "Invalid input, use TOTAL/PEOPLE with people > 0")
 
 if __name__ == "__main__":
     main()
