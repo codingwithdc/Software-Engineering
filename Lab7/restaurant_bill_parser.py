@@ -34,10 +34,22 @@ def parse_item_prices(text):
 def split_amount(text):
     """
     Splits 'TOTAL/PEOPLE' into the amount each person pays.
-    Assumes both values are whole numbers and people is not zero.
+    Returns None if the input is not a string, is not in TOTAL/PEOPLE
+    form, has non-whole-number values, a negative total, or people <= 0.
     """
-    total, people = text.split('/')
-    return int(total) // int(people)
+    if not isinstance(text, str):
+        return None
+    parts = text.split('/')
+    if len(parts) != 2:
+        return None
+    try:
+        total = int(parts[0])
+        people = int(parts[1])
+    except ValueError:
+        return None
+    if total < 0 or people <= 0:
+        return None
+    return total // people
 
 def main():
     print("==== Running clean_dish_name ====")
