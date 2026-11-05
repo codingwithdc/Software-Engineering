@@ -1,12 +1,13 @@
 def clean_dish_name(name):
     """
     Removes the chef's-special markers (*, #, ~) and title-cases the name.
-    Assumes name is a non-empty string.
+    Returns an empty string for None, non-string or blank input.
     """
-    name = name.strip()
+    if not isinstance(name, str):
+        return ""
     for ch in ['*', '#', '~']:
         name = name.replace(ch, '')
-    return name.title()
+    return name.strip().title()
 
 def parse_item_prices(text):
     """
